@@ -1,15 +1,12 @@
 //! A simple timer, used to enqueue operations meant to be executed at
 //! a given time or after a given delay.
 
-mod shutdown;
-
-use std::future::Future;
-use std::pin::{pin, Pin};
-use std::task::{Context, Poll};
+use std::future::{Future, IntoFuture};
+use std::pin::Pin;
 use std::time::Duration;
 
 use chrono::{NaiveDateTime, Utc};
-pub use shutdown::Shutdown;
+use futures::FutureExt as _;
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
@@ -23,32 +20,31 @@ pub enum TimerError {
 }
 
 /// A timer, used to schedule execution of callbacks in a given future.
-pub struct Timer<F>
-where
-    F: FnMut() -> Option<NaiveDateTime>,
-    F: Send + Sync,
-{
-    callback: F,
+///
+/// If the callback does not provide the new time period, the next execution
+/// will be scheduled for a distant future.
+pub struct Timer<F: 'static, S: 'static> {
+    callback: Pin<Box<F>>,
     deadline: Instant,
     watchdog: (mpsc::Sender<NaiveDateTime>, mpsc::Receiver<NaiveDateTime>),
-    shutdown: Shutdown,
+    shutdown: Pin<Box<S>>,
 }
 
-impl<F> Timer<F>
+impl<F, S> Timer<F, S>
 where
-    F: FnMut() -> Option<NaiveDateTime>,
-    F: Send + Sync,
+    F: Fn() -> Option<NaiveDateTime> + Send,
+    S: Future + Send,
 {
     /// Creates a Timer instance.
-    pub fn new(callback: F, shutdown: Shutdown) -> Self {
+    pub fn new(callback: F, shutdown: S) -> Self {
         let watchdog = mpsc::channel(1);
 
         Self {
-            callback,
+            callback: Box::pin(callback),
             // Since it's the first call, it starts sleeping forever.
             deadline: far_future(),
             watchdog,
-            shutdown,
+            shutdown: Box::pin(shutdown),
         }
     }
 
@@ -63,40 +59,53 @@ where
     }
 }
 
-impl<F> Future for Timer<F>
+impl<F, S> IntoFuture for Timer<F, S>
 where
-    F: FnMut() -> Option<NaiveDateTime>,
-    F: Send + Sync + Unpin,
+    F: Fn() -> Option<NaiveDateTime> + Send,
+    S: Future + Send,
 {
     type Output = ();
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output>>>;
 
-    fn poll(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Self::Output> {
-        let poll_fn = async move {
+    fn into_future(self) -> Self::IntoFuture {
+        async move {
             let Self {
                 callback,
                 deadline,
                 watchdog: (_, watchdog),
                 shutdown,
-            } = self.as_mut().get_mut();
+            } = self;
 
-            let sleep = tokio::time::sleep_until(*deadline);
-            tokio::pin!(sleep);
+            let sleep = tokio::time::sleep_until(deadline);
 
-            // TODO(fixme): the sleep only wakes up when the time's up and receive
-            // a new deadline which is earlier than previous one.
+            futures::pin_mut!(callback);
+            futures::pin_mut!(sleep);
+            futures::pin_mut!(shutdown);
+            futures::pin_mut!(watchdog);
+
             loop {
-                tracing::debug!(
-                    "sleeping for {} secs",
-                    deadline.duration_since(Instant::now()).as_secs()
-                );
+                let duration = sleep.deadline() - Instant::now();
+                tracing::trace!("sleeping for {} secs", duration.as_secs());
 
                 tokio::select! {
+                    // Wait for a new deadline.
+                    Some(new_deadline) = watchdog.recv() => {
+                        let new_duration = new_deadline - Utc::now().naive_utc();
+                        let Ok(new_duration) = new_duration.to_std() else {
+                            tracing::trace!("unable to schedule a timer for a time in the past");
+                            continue;
+                        };
+
+                        tracing::trace!("task will be executed {} secs from now", new_duration.as_secs());
+
+                        // Change the sleep time for next iteration.
+                        let deadline = Instant::now() + new_duration;
+                        sleep.as_mut().reset(deadline);
+                    },
                     // Wait for the next run.
                     () = &mut sleep => {
-                        let deadline = if let Some(new_deadline) = callback() {
+                        tracing::trace!("timer elapsed");
+                        let deadline = if let Some(new_deadline) = (callback)() {
                             let duration = Utc::now().naive_utc() - new_deadline;
                             let Ok(duration) = duration.to_std() else {
                                 continue;
@@ -109,31 +118,13 @@ where
 
                         sleep.as_mut().reset(deadline);
                     },
-                    // Wait for a new deadline.
-                    Some(new_deadline) = watchdog.recv() => {
-                        let new_duration = new_deadline - Utc::now().naive_utc();
-
-                        let Ok(new_duration) = new_duration.to_std() else {
-                            tracing::debug!("failed to set a timer for past");
-                            continue;
-                        };
-
-                        tracing::debug!("time will be run {} secs from now", new_duration.as_secs());
-
-                        // Change the sleep time for next iteration.
-                        let deadline = Instant::now() + new_duration;
-                        sleep.as_mut().reset(deadline);
-                    },
-                    // Stop if shutdown signal is received.
-                    _ = shutdown.recv() => {
-                        tracing::debug!("received a SIGINT");
+                    _ = &mut shutdown => {
+                        tracing::trace!("received shutdown signal");
                         break;
-                    },
+                    }
                 }
             }
-        };
-
-        pin!(poll_fn).poll(cx)
+        }.boxed()
     }
 }
 
@@ -147,7 +138,7 @@ impl Scheduler {
             .await
             .map_err(|_| TimerError::Closed)?;
 
-        tracing::debug!("scheduled a new execution for {}", deadline);
+        tracing::trace!("scheduled a new execution for {}", deadline);
 
         Ok(())
     }
