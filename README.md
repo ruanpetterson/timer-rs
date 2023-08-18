@@ -5,19 +5,12 @@ Simple implementation of a Timer in async Rust.
 # Example
 
 ```rust
-fn main() {
-    let timer = Timer::new(
-        callback,
-        notify_shutdown.subscribe().into(),
-    );
-
-    timer.schedule(Utc::now().naive_utc());
-
-    timer.await;
-}
-
-fn callback() -> Option<NaiveDateTime> {
-    println!("Hello, World!");
+let task = || {
+    eprintln!("task was executed");
     None
-}
+};
+
+let timer = Timer::new(task).with_graceful_shutdown(signal::ctrl_c());
+
+timer.await;
 ```
