@@ -23,20 +23,18 @@ pub enum TimerError {
 ///
 /// If the callback does not provide the new time period, the next execution
 /// will be scheduled for a distant future.
-pub struct Timer<F: 'static, S: 'static> {
-    callback: Pin<Box<F>>,
+pub struct Timer {
+    callback: Pin<Box<dyn Fn() -> Option<NaiveDateTime> + Send>>,
     deadline: Instant,
     watchdog: (mpsc::Sender<NaiveDateTime>, mpsc::Receiver<NaiveDateTime>),
-    shutdown: Pin<Box<S>>,
+    shutdown: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
 }
 
-impl<F, S> Timer<F, S>
-where
-    F: Fn() -> Option<NaiveDateTime> + Send,
-    S: Future + Send,
-{
+impl Timer {
     /// Creates a Timer instance.
-    pub fn new(callback: F, shutdown: S) -> Self {
+    pub fn new(
+        callback: impl Fn() -> Option<NaiveDateTime> + Send + 'static,
+    ) -> Self {
         let watchdog = mpsc::channel(1);
 
         Self {
@@ -44,7 +42,17 @@ where
             // Since it's the first call, it starts sleeping forever.
             deadline: far_future(),
             watchdog,
-            shutdown: Box::pin(shutdown),
+            shutdown: None,
+        }
+    }
+
+    pub fn with_graceful_shutdown<O>(
+        self,
+        shutdown: impl Future<Output = O> + Send + 'static,
+    ) -> Self {
+        Self {
+            shutdown: Some(Box::pin(shutdown.map(|_| ()))),
+            ..self
         }
     }
 
@@ -59,11 +67,7 @@ where
     }
 }
 
-impl<F, S> IntoFuture for Timer<F, S>
-where
-    F: Fn() -> Option<NaiveDateTime> + Send,
-    S: Future + Send,
-{
+impl IntoFuture for Timer {
     type Output = ();
     type IntoFuture = Pin<Box<dyn Future<Output = Self::Output>>>;
 
@@ -77,10 +81,9 @@ where
             } = self;
 
             let sleep = tokio::time::sleep_until(deadline);
+            let mut shutdown = shutdown.unwrap_or_else(|| Box::pin(futures::future::pending()));
 
-            futures::pin_mut!(callback);
             futures::pin_mut!(sleep);
-            futures::pin_mut!(shutdown);
             futures::pin_mut!(watchdog);
 
             loop {
