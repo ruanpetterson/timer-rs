@@ -3,52 +3,39 @@ use axum::routing::post;
 use axum::Router;
 use timer_rs::Timer;
 use tokio::signal;
-use tokio::sync::broadcast;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize tracing.
     tracing_subscriber::fmt::init();
 
-    // When the provided `shutdown` future completes, we must send a shutdown
-    // message to all active connections. We use a broadcast channel for this
-    // purpose. The call below ignores the receiver of the broadcast pair, and
-    // when a receiver is needed, the subscribe() method on the sender is used
-    // to create one.
-    let (notify_shutdown, _) = broadcast::channel(1);
-
     let timer = Timer::new(
         || {
-            tracing::info!("Task was executed");
+            tracing::info!("task was executed");
             None
         },
-        notify_shutdown.subscribe().into(),
+        signal::ctrl_c(),
     );
 
     let scheduler = timer.scheduler();
     tokio::spawn(async move {
+        let addr = "0.0.0.0:3000".parse().unwrap();
+
         // Build a application with a route.
         let app = Router::new()
             // `GET /` goes to `root`.
             .route("/", post(http::root))
             .with_state(http::AppState { scheduler });
 
-        axum::Server::bind(&"0.0.0.0:3000".parse().unwrap())
+        tracing::info!("listening on {}", addr);
+
+        axum::Server::bind(&addr)
             .serve(app.into_make_service())
             .await
             .unwrap();
     });
 
-    let timer = tokio::spawn(async move {
-        timer.await;
-    });
-
-    signal::ctrl_c().await?;
-
-    // When `notify_shutdown` is dropped, all tasks which have `subscribe`d will
-    // receive the shutdown signal and can exit
-    drop(notify_shutdown);
-    drop(timer);
+    timer.await;
 
     Ok(())
 }
