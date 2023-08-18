@@ -145,6 +145,16 @@ impl Scheduler {
 
         Ok(())
     }
+
+    pub fn blocking_schedule(&self, deadline: NaiveDateTime) -> Result<()> {
+        self.0
+            .blocking_send(deadline)
+            .map_err(|_| TimerError::Closed)?;
+
+        tracing::trace!("scheduled a new execution for {}", deadline);
+
+        Ok(())
+    }
 }
 
 pub(crate) fn far_future() -> Instant {
