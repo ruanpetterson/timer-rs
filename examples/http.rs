@@ -9,13 +9,11 @@ async fn main() -> Result<()> {
     // Initialize tracing.
     tracing_subscriber::fmt::init();
 
-    let timer = Timer::new(
-        || {
-            tracing::info!("task was executed");
-            None
-        },
-        signal::ctrl_c(),
-    );
+    let timer = Timer::new(|| {
+        tracing::info!("task was executed");
+        None
+    })
+    .with_graceful_shutdown(signal::ctrl_c());
 
     let scheduler = timer.scheduler();
     tokio::spawn(async move {
