@@ -33,7 +33,7 @@ async fn main() -> Result<()> {
             .unwrap();
     });
 
-    timer.await;
+    tokio::spawn(async move { timer.await }).await?;
 
     Ok(())
 }

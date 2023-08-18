@@ -69,7 +69,7 @@ impl Timer {
 
 impl IntoFuture for Timer {
     type Output = ();
-    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output>>>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send>>;
 
     fn into_future(self) -> Self::IntoFuture {
         async move {
