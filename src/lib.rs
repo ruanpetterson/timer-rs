@@ -165,3 +165,61 @@ pub(crate) fn far_future() -> Instant {
     // overflows on FreeBSD.
     Instant::now() + Duration::from_secs(86400 * 365 * 30)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+    use std::sync::{Arc, Mutex, PoisonError};
+
+    use tokio::sync::mpsc;
+
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn it_works() {
+        let buf = Vec::with_capacity(1024);
+        let shared_buf = Arc::new(Mutex::new(buf));
+
+        let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
+
+        let (evaluate_tx, mut evaluate_rx) = mpsc::channel::<()>(1);
+
+        let shared_buf_ = shared_buf.clone();
+        let timer = Timer::new(move || {
+            let mut buf = shared_buf_.lock().unwrap();
+            buf.write(b"it works").unwrap();
+            tokio::task::block_in_place(|| {
+                shutdown_tx.blocking_send(()).unwrap();
+            });
+            None
+        })
+        .with_graceful_shutdown(async move {
+            shutdown_rx.recv().await;
+        });
+
+        let scheduler = timer.scheduler();
+
+        tokio::spawn(async move {
+            timer.await;
+            evaluate_tx.send(()).await.unwrap();
+        });
+
+        scheduler
+            .schedule(Utc::now().naive_utc() + chrono::Duration::seconds(3))
+            .await
+            .unwrap();
+
+        evaluate_rx
+            .recv()
+            .then(|_| async {
+                assert_eq!(
+                    shared_buf
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .as_slice(),
+                    b"it works"
+                )
+            })
+            .await;
+    }
+}
