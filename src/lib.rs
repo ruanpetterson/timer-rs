@@ -177,6 +177,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn it_works() {
+        // Create a buffer and make it shareable.
         let buf = Vec::with_capacity(1024);
         let shared_buf = Arc::new(Mutex::new(buf));
 
@@ -184,41 +185,47 @@ mod tests {
 
         let (evaluate_tx, mut evaluate_rx) = mpsc::channel::<()>(1);
 
+        // Clone the sharde buffer and send it to the Timer task.
         let shared_buf_ = shared_buf.clone();
         let timer = Timer::new(move || {
-            let mut buf = shared_buf_.lock().unwrap();
+            let mut buf =
+                shared_buf_.lock().unwrap_or_else(PoisonError::into_inner);
             buf.write(b"it works").unwrap();
             tokio::task::block_in_place(|| {
+                // As soon as the task is run, send a shutdown signal.
                 shutdown_tx.blocking_send(()).unwrap();
             });
             None
         })
         .with_graceful_shutdown(async move {
+            // Waits the shutdown signal to be received.
             shutdown_rx.recv().await;
         });
 
-        let scheduler = timer.scheduler();
+        // Schedule a new run in the next 3 seconds.
+        timer
+            .schedule(Utc::now().naive_utc() + chrono::Duration::seconds(3))
+            .await
+            .unwrap();
 
+        // Spawn the Timer.
         tokio::spawn(async move {
             timer.await;
             evaluate_tx.send(()).await.unwrap();
         });
 
-        scheduler
-            .schedule(Utc::now().naive_utc() + chrono::Duration::seconds(3))
-            .await
-            .unwrap();
-
+        // Waits the Timer be shutdown and evaluate the buffer.
         evaluate_rx
             .recv()
             .then(|_| async {
-                assert_eq!(
-                    shared_buf
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .as_slice(),
-                    b"it works"
-                )
+                let buf = Arc::into_inner(shared_buf)
+                    .map(|b| {
+                        Mutex::into_inner(b)
+                            .unwrap_or_else(PoisonError::into_inner)
+                    })
+                    .unwrap();
+
+                assert_eq!(buf, b"it works")
             })
             .await;
     }
