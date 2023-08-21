@@ -1,7 +1,7 @@
 [package]
 name = "timer-rs"
 description = "A simple timer used to schedule execution of closures at a given timestamp."
-version = "0.0.5"
+version = "0.0.6"
 edition = "2021"
 rust-version = "1.71"
 authors = ["Ruan Petterson <ruan@ruan.eng.br>"]
