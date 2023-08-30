@@ -1,7 +1,7 @@
 use anyhow::Result;
 use axum::routing::post;
 use axum::Router;
-use timer_rs::Timer;
+use timeware::Timer;
 use tokio::signal;
 
 #[tokio::main]
@@ -9,11 +9,7 @@ async fn main() -> Result<()> {
     // Initialize tracing.
     tracing_subscriber::fmt::init();
 
-    let timer = Timer::new(|| {
-        tracing::info!("task was executed");
-        None
-    })
-    .with_graceful_shutdown(signal::ctrl_c());
+    let timer = Timer::new().with_graceful_shutdown(signal::ctrl_c());
 
     let scheduler = timer.scheduler();
     tokio::spawn(async move {
@@ -41,7 +37,7 @@ async fn main() -> Result<()> {
 mod http {
     use axum::{extract::State, response::IntoResponse, Json};
     use chrono::NaiveDateTime;
-    use timer_rs::Scheduler;
+    use timeware::Scheduler;
 
     #[derive(Clone)]
     pub struct AppState {
@@ -59,6 +55,10 @@ mod http {
         Json(payload): Json<Payload>,
     ) -> impl IntoResponse {
         tracing::info!("received scheduling for {}", payload.date);
-        state.scheduler.schedule(payload.date).await.unwrap();
+        state
+            .scheduler
+            .schedule(payload.date, || tracing::info!("task was executed"))
+            .await
+            .unwrap();
     }
 }
