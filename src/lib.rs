@@ -85,16 +85,24 @@ impl IntoFuture for Timer {
             } = self;
 
             let sleep = tokio::time::sleep_until(far_future());
-            let mut shutdown = shutdown.unwrap_or_else(|| Box::pin(futures::future::pending()));
+            let mut shutdown = shutdown
+                .unwrap_or_else(|| Box::pin(futures::future::pending()));
 
             futures::pin_mut!(sleep);
             futures::pin_mut!(watchdog);
 
             loop {
                 if let Some(entry) = callbacks.first_entry() {
-                    let deadline =  {
+                    let deadline = {
                         let duration = *entry.key() - Utc::now().naive_utc();
+                        // The occurrence of failure is limited to cases where the
+                        // `duration` is negative and only arises once the deadline is
+                        // reached. Consequently, it is essential to execute the stored
+                        // closures in such situations.
                         let Ok(duration) = duration.to_std() else {
+                            for callback in entry.remove() {
+                                (callback)();
+                            }
                             continue;
                         };
 
@@ -119,7 +127,7 @@ impl IntoFuture for Timer {
                             tracing::trace!("received shutdown signal");
                             break;
                         }
-                    }
+                    };
                 } else {
                     tokio::select! {
                         // Wait for a new deadline.
@@ -130,10 +138,11 @@ impl IntoFuture for Timer {
                             tracing::trace!("received shutdown signal");
                             break;
                         }
-                    }
+                    };
                 }
             }
-        }.boxed()
+        }
+        .boxed()
     }
 }
 
