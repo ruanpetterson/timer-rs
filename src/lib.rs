@@ -26,11 +26,11 @@ pub enum TimerError {
 /// will be scheduled for a distant future.
 pub struct Timer {
     watchdog: (
-        mpsc::Sender<(NaiveDateTime, Pin<Box<dyn Fn() + Send>>)>,
-        mpsc::Receiver<(NaiveDateTime, Pin<Box<dyn Fn() + Send>>)>,
+        mpsc::Sender<(NaiveDateTime, Box<dyn FnOnce() + Send>)>,
+        mpsc::Receiver<(NaiveDateTime, Box<dyn FnOnce() + Send>)>,
     ),
     shutdown: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
-    callbacks: BTreeMap<NaiveDateTime, Vec<Pin<Box<dyn Fn() + Send>>>>,
+    callbacks: BTreeMap<NaiveDateTime, Vec<Box<dyn FnOnce() + Send>>>,
 }
 
 impl Timer {
@@ -66,7 +66,7 @@ impl Timer {
     pub async fn schedule(
         &self,
         deadline: NaiveDateTime,
-        callback: impl Fn() + Send + 'static,
+        callback: impl FnOnce() + Send + 'static,
     ) -> Result<()> {
         self.scheduler().schedule(deadline, callback).await
     }
@@ -147,17 +147,17 @@ impl IntoFuture for Timer {
 }
 
 #[derive(Clone)]
-pub struct Scheduler(mpsc::Sender<(NaiveDateTime, Pin<Box<dyn Fn() + Send>>)>);
+pub struct Scheduler(mpsc::Sender<(NaiveDateTime, Box<dyn FnOnce() + Send>)>);
 
 impl Scheduler {
     /// Schedule for execution after a delay.
     pub async fn schedule(
         &self,
         deadline: NaiveDateTime,
-        callback: impl Fn() + Send + 'static,
+        callback: impl FnOnce() + Send + 'static,
     ) -> Result<()> {
         self.0
-            .send((deadline, Box::pin(callback)))
+            .send((deadline, Box::new(callback)))
             .await
             .map_err(|_| TimerError::Closed)?;
 
@@ -169,10 +169,10 @@ impl Scheduler {
     pub fn blocking_schedule(
         &self,
         deadline: NaiveDateTime,
-        callback: impl Fn() + Send + 'static,
+        callback: impl FnOnce() + Send + 'static,
     ) -> Result<()> {
         self.0
-            .blocking_send((deadline, Box::pin(callback)))
+            .blocking_send((deadline, Box::new(callback)))
             .map_err(|_| TimerError::Closed)?;
 
         tracing::trace!("scheduled a new execution for {}", deadline);
